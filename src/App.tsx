@@ -1,13 +1,15 @@
 "use client"
 
 import type React from "react"
-
-import { useState } from "react"
-import { Search, Send, FileText, Calendar, Mail, Folder } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Card, CardContent } from "@/components/ui/card"
-import { cn } from "@/lib/utils"
+import {useState} from "react"
+import {Calendar, FileText, Folder, Mail, Search, Send} from "lucide-react"
+import {Button} from "@/components/ui/button"
+import {Input} from "@/components/ui/input"
+import {Card, CardContent} from "@/components/ui/card"
+import {cn} from "@/lib/utils"
+import {apiClient} from "@/lib/api-client"
+import type {SearchResult} from "@/types/api"
+import {ApiError} from "@/types/api"
 
 interface RecentFile {
   id: string
@@ -73,21 +75,72 @@ const getFileTypeLabel = (type: RecentFile["type"]) => {
 export default function KnowledgeSearchChat() {
   const [isConversationMode, setIsConversationMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
-  const [messages, setMessages] = useState<Array<{ id: string; content: string; isUser: boolean }>>([])
+  const [messages, setMessages] = useState<Array<{
+    id: string;
+    content: string;
+    isUser: boolean;
+    results?: SearchResult[];
+    error?: string
+  }>>([])
+  const [isLoading, setIsLoading] = useState(false)
 
-  const handleSearch = () => {
-    if (!searchQuery.trim()) return
+  // Note: API client now uses direct MCP operations, no base URL configuration needed
 
-    setMessages([
-      { id: "1", content: searchQuery, isUser: true },
-      {
-        id: "2",
-        content: `「${searchQuery}」について検索しています。Notion、Google Drive、Gmailから関連する情報を探しています...`,
-        isUser: false,
-      },
-    ])
+  const handleSearch = async () => {
+    if (!searchQuery.trim() || isLoading) return
+
+    const query = searchQuery.trim()
+    const userMessage = {id: `user-${Date.now()}`, content: query, isUser: true}
+    const loadingMessage = {
+      id: `loading-${Date.now()}`,
+      content: `「${query}」について検索しています。NotionとAsanaから関連する情報を探しています...`,
+      isUser: false
+    }
+
+    setMessages([userMessage, loadingMessage])
     setIsConversationMode(true)
     setSearchQuery("")
+    setIsLoading(true)
+
+    try {
+      const results = await apiClient.search(query)
+
+      // Update the loading message with results
+      const resultMessage = {
+        id: `result-${Date.now()}`,
+        content: results.length > 0
+          ? `${results.length}件の検索結果が見つかりました：`
+          : '検索結果が見つかりませんでした。別のキーワードで試してみてください。',
+        isUser: false,
+        results: results.length > 0 ? results : undefined
+      }
+
+      setMessages([userMessage, resultMessage])
+    } catch (error) {
+      console.error('Search failed:', error)
+
+      let errorMessage = '検索中にエラーが発生しました。'
+      if (error instanceof ApiError) {
+        if (error.statusCode === 400) {
+          errorMessage = 'クエリが無効です。別のキーワードで試してみてください。'
+        } else if (error.statusCode === 500) {
+          errorMessage = 'サーバーエラーが発生しました。しばらくしてから再試行してください。'
+        } else {
+          errorMessage = error.message
+        }
+      }
+
+      const errorResultMessage = {
+        id: `error-${Date.now()}`,
+        content: errorMessage,
+        isUser: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+
+      setMessages([userMessage, errorResultMessage])
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -127,7 +180,7 @@ export default function KnowledgeSearchChat() {
                       placeholder="何について調べますか？"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyPress={handleKeyPress}
+                      onKeyDown={handleKeyPress}
                       className="pl-10 h-12 text-base border-0 focus-visible:ring-2 focus-visible:ring-accent border-transparent shadow-none"
                     />
                   </div>
@@ -198,13 +251,71 @@ export default function KnowledgeSearchChat() {
                 <div key={message.id} className={cn("flex", message.isUser ? "justify-end" : "justify-start")}>
                   <div
                     className={cn(
-                      "max-w-[80%] py-3 rounded-full mx-0 px-5",
+                      "max-w-[80%] py-3 mx-0 px-5",
                       message.isUser
-                        ? "bg-accent text-accent-foreground"
-                        : "bg-card text-card-foreground border border-border",
+                        ? "bg-accent text-accent-foreground rounded-full"
+                        : "bg-card text-card-foreground border border-border rounded-lg",
                     )}
                   >
                     <p className="text-sm leading-relaxed">{message.content}</p>
+
+                    {/* Display search results */}
+                    {message.results && message.results.length > 0 && (
+                      <div className="mt-4 space-y-3">
+                        {message.results.map((result) => (
+                          <Card key={result.id} className="border border-border">
+                            <CardContent className="p-4">
+                              <div className="flex items-start gap-3">
+                                <div className="mt-1">
+                                  {result.source === 'notion' ? (
+                                    <FileText className="h-4 w-4 text-primary"/>
+                                  ) : (
+                                    <Calendar className="h-4 w-4 text-accent"/>
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-medium text-foreground truncate text-sm">
+                                    {result.title}
+                                  </h4>
+                                  <p className="text-xs text-muted-foreground mt-1 line-clamp-3">
+                                    {result.content}
+                                  </p>
+                                  <div className="flex items-center gap-2 mt-2">
+                                    <span className="text-xs text-accent font-medium capitalize">
+                                      {result.source}
+                                    </span>
+                                    {result.lastModified && (
+                                      <span className="text-xs text-muted-foreground">
+                                        {new Date(result.lastModified).toLocaleDateString('ja-JP')}
+                                      </span>
+                                    )}
+                                    {result.url && (
+                                      <a
+                                        href={result.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs text-blue-600 hover:text-blue-800 underline"
+                                      >
+                                        開く
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Display error message */}
+                    {message.error && (
+                      <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
+                        <p className="text-xs text-red-700">
+                          エラー詳細: {message.error}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
