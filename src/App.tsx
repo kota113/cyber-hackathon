@@ -1,13 +1,13 @@
 "use client"
 
 import type React from "react"
-
-import { useState } from "react"
-import { Search, Send, FileText, Calendar, Mail, Folder } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Card, CardContent } from "@/components/ui/card"
-import { cn } from "@/lib/utils"
+import {useState} from "react"
+import {Calendar, FileText, Folder, Mail, Search, Send} from "lucide-react"
+import {Button} from "@/components/ui/button"
+import {Input} from "@/components/ui/input"
+import {Card, CardContent} from "@/components/ui/card"
+import {cn} from "@/lib/utils"
+import {type ChatMessage, ChatService} from "@/services/chatService"
 
 interface RecentFile {
   id: string
@@ -73,26 +73,143 @@ const getFileTypeLabel = (type: RecentFile["type"]) => {
 export default function KnowledgeSearchChat() {
   const [isConversationMode, setIsConversationMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
-  const [messages, setMessages] = useState<Array<{ id: string; content: string; isUser: boolean }>>([])
+  const [followUpQuery, setFollowUpQuery] = useState("")
+  const [messages, setMessages] = useState<ChatMessage[]>([])
 
-  const handleSearch = () => {
+  const handleSearch = async () => {
     if (!searchQuery.trim()) return
 
-    setMessages([
-      { id: "1", content: searchQuery, isUser: true },
-      {
-        id: "2",
-        content: `「${searchQuery}」について検索しています。Notion、Google Drive、Gmailから関連する情報を探しています...`,
-        isUser: false,
-      },
-    ])
+    const userMessageId = ChatService.generateMessageId()
+    const assistantMessageId = ChatService.generateMessageId()
+
+    // Add user message
+    const userMessage: ChatMessage = {
+      id: userMessageId,
+      content: searchQuery,
+      isUser: true
+    }
+
+    // Add initial assistant message
+    const assistantMessage: ChatMessage = {
+      id: assistantMessageId,
+      content: "",
+      isUser: false,
+      isStreaming: true
+    }
+
+    setMessages([userMessage, assistantMessage])
     setIsConversationMode(true)
+
+    const currentQuery = searchQuery
     setSearchQuery("")
+
+    try {
+      let accumulatedContent = ""
+
+      for await (const message of ChatService.streamChat(currentQuery)) {
+        if (message.type === 'text-delta' && message.delta) {
+          accumulatedContent += message.delta
+
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantMessageId
+              ? {...msg, content: accumulatedContent, isStreaming: true}
+              : msg
+          ))
+        } else if (message.type === 'done') {
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantMessageId
+              ? {...msg, isStreaming: false}
+              : msg
+          ))
+          break
+        }
+        // Note: tool:start events are received but not displayed in UI for now
+      }
+    } catch (error) {
+      console.error('Error streaming chat:', error)
+      setMessages(prev => prev.map(msg =>
+        msg.id === assistantMessageId
+          ? {
+            ...msg,
+            content: "申し訳ございません。接続エラーが発生しました。もう一度お試しください。",
+            isStreaming: false
+          }
+          : msg
+      ))
+    }
+  }
+
+  const handleFollowUp = async () => {
+    if (!followUpQuery.trim()) return
+
+    const userMessageId = ChatService.generateMessageId()
+    const assistantMessageId = ChatService.generateMessageId()
+
+    // Add user message to existing conversation
+    const userMessage: ChatMessage = {
+      id: userMessageId,
+      content: followUpQuery,
+      isUser: true
+    }
+
+    // Add initial assistant message
+    const assistantMessage: ChatMessage = {
+      id: assistantMessageId,
+      content: "",
+      isUser: false,
+      isStreaming: true
+    }
+
+    setMessages(prev => [...prev, userMessage, assistantMessage])
+
+    const currentQuery = followUpQuery
+    setFollowUpQuery("")
+
+    try {
+      let accumulatedContent = ""
+
+      for await (const message of ChatService.streamChat(currentQuery)) {
+        if (message.type === 'text-delta' && message.delta) {
+          accumulatedContent += message.delta
+
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantMessageId
+              ? {...msg, content: accumulatedContent, isStreaming: true}
+              : msg
+          ))
+        } else if (message.type === 'done') {
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantMessageId
+              ? {...msg, isStreaming: false}
+              : msg
+          ))
+          break
+        }
+        // Note: tool:start events are received but not displayed in UI for now
+      }
+    } catch (error) {
+      console.error('Error streaming follow-up chat:', error)
+      setMessages(prev => prev.map(msg =>
+        msg.id === assistantMessageId
+          ? {
+            ...msg,
+            content: "申し訳ございません。接続エラーが発生しました。もう一度お試しください。",
+            isStreaming: false
+          }
+          : msg
+      ))
+    }
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       handleSearch()
+    }
+  }
+
+  const handleFollowUpKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleFollowUp()
     }
   }
 
@@ -218,10 +335,14 @@ export default function KnowledgeSearchChat() {
                 <div className="relative flex-1">
                   <Input
                     placeholder="追加で質問がありますか？"
+                    value={followUpQuery}
+                    onChange={(e) => setFollowUpQuery(e.target.value)}
+                    onKeyPress={handleFollowUpKeyPress}
                     className="h-12 pr-12 border-border focus-visible:ring-2 focus-visible:ring-accent rounded-full"
                   />
                   <Button
                     size="sm"
+                    onClick={handleFollowUp}
                     className="absolute right-0 top-1/2 transform -translate-y-1/2 h-12 w-14 p-0 bg-accent hover:bg-accent/90 rounded-r-full cursor-pointer"
                   >
                     <Send className="h-4 w-4" />
